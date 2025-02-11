@@ -41,6 +41,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <sys/param.h>
 #include <linux/kernel-page-flags.h>
 #include "predict.h"
 
@@ -127,6 +128,165 @@ unsigned int mywsf;
  */
 int max_compaction_order = MAX_ORDER - 4;
 
+char *sample_path = NULL;
+int iteration;
+void bailout(int retval);
+bool capture_debug = false;
+bool capture_data = false;
+int max_loops = 0;
+
+bool is_more_samples()
+{
+	char new_path[FILENAME_MAX];
+
+	if (!sample_path)
+		return false;
+
+	sprintf(new_path, "%s/zoneinfo.%d", sample_path, iteration);
+	if (access(new_path, F_OK) == 0)
+		return true;
+
+	if (capture_debug)
+		log_info(5, "is_more_samples: can't find %s\n", new_path);
+	return false;
+}
+
+int adaptivemm_open(const char *pathname, int flags)
+{
+	char new_path[LINE_MAX];
+
+	if (!pathname)
+		return 0;
+	if (!sample_path)
+		return(open(pathname, flags));
+
+	if (capture_debug)
+		log_info(5, "\nadaptivemm_open: %s 0x%o\n", pathname, flags);
+	if (strcmp(pathname, KPAGECOUNT) == 0) {
+		sprintf(new_path, "%s/kpagecount.%d", sample_path, iteration);
+	} else if (strcmp(pathname, KPAGEFLAGS) == 0) {
+		sprintf(new_path, "%s/kpageflags.%d", sample_path, iteration);
+	} else if (strcmp(pathname, RESCALE_WMARK) == 0) {
+		sprintf(new_path, "%s/rescale_wmark.%d", sample_path, iteration);
+	} else if (strcmp(pathname, NEG_DENTRY_LIMIT) == 0) {
+		sprintf(new_path, "%s/neg_dentry_limit.%d", sample_path, iteration);
+	} else {
+		return 0;
+	}
+	if (capture_debug)
+		log_info(5, "adaptivemm_open: %s\n", new_path);
+
+	if (!capture_data) {
+		if (access(new_path, F_OK) != 0) {
+			log_info(5, "adaptivemm_open: can't find %s\n", new_path);
+			bailout(0);
+		}
+		return(open(new_path, flags));
+	} else {
+		char cmdline[FILENAME_MAX];
+
+		sprintf(cmdline, "cp %s %s", pathname, new_path);
+#if 1
+		system(cmdline);
+#else
+		int ret = system(cmdline);
+		if (capture_debug)
+			log_info(5, "cmdline: %s, ret=%d\n", cmdline, ret);
+#endif
+		if (flags & O_WRONLY)
+			return(open(pathname, flags));
+		else
+			return(open(new_path, flags));
+	}
+}
+
+FILE *adaptivemm_fopen(const char *pathname, const char *mode)
+{
+	char new_path[LINE_MAX];
+
+	if (!pathname)
+		return NULL;
+	if (!sample_path)
+		return(fopen(pathname, mode));
+
+	if (capture_debug)
+		log_info(5, "\nadaptivemm_fopen: %s, %s\n", pathname, mode);
+	if (strcmp(pathname, BUDDYINFO) == 0) {
+		sprintf(new_path, "%s/buddyinfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, ZONEINFO) == 0) {
+		sprintf(new_path, "%s/zoneinfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, VMSTAT) == 0) {
+		sprintf(new_path, "%s/vmstat.%d", sample_path, iteration);
+	} else if (strcmp(pathname, MEMINFO) == 0) {
+		sprintf(new_path, "%s/meminfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, MODULES) == 0) {
+		sprintf(new_path, "%s/modules.%d", sample_path, iteration);
+	} else {
+		return NULL;
+	}
+	if (capture_debug)
+		log_info(5, "adaptivemm_fopen: %s\n", new_path);
+	if (!capture_data) {
+		if (access(new_path, F_OK) != 0) {
+			log_info(5, "adaptivemm_fopen: can't find %s\n", new_path);
+			bailout(0);
+		}
+		return(fopen(new_path, mode));
+	} else {
+		char cmdline[FILENAME_MAX];
+
+		sprintf(cmdline, "cp %s %s", pathname, new_path);
+#if 1
+		system(cmdline);
+#else
+		int ret = system(cmdline);
+		if (capture_debug)
+			log_info(5, "cmdline: %s, ret=%d\n", cmdline, ret);
+#endif
+		return(fopen(new_path, mode));
+	}
+}
+
+DIR *adaptivemm_opendir(const char *pathname, char *dirname)
+{
+	char new_path[LINE_MAX];
+
+	if (!sample_path)
+		return(opendir(pathname));
+
+	if (!pathname || !dirname)
+		return NULL;
+
+	if (capture_debug)
+		log_info(5, "\nadaptivemm_opendir: %s\n", pathname);
+	if (strcmp(pathname, HUGEPAGESINFO) == 0)
+		sprintf(new_path, "%s/hugepages.%d", sample_path, iteration);
+	else 
+		return NULL;
+	if (capture_debug)
+		log_info(5, "adaptivemm_opendir: %s\n", new_path);
+	memcpy(dirname, new_path, strlen(new_path));
+	if (!capture_data) {
+		if (access(new_path, F_OK) != 0) {
+			log_info(5, "adaptivemm_opendir: can't find %s\n", new_path);
+			bailout(0);
+		}
+		return(opendir(new_path));
+	} else {
+		char cmdline[FILENAME_MAX];
+
+		sprintf(cmdline, "cp -r %s %s", pathname, new_path);
+#if 1
+		system(cmdline);
+#else
+		int ret = system(cmdline);
+		if (capture_debug)
+			log_info(5, "cmdline: %s, ret=%d\n", cmdline, ret);
+#endif
+	
+		return(opendir(new_path));
+	}
+}
 
 /*
  * Clean up before exiting
@@ -155,7 +315,14 @@ log_msg(int level, char *fmt, ...)
 	va_list args;
 
 	va_start(args, fmt);
-	if (debug_mode) {
+	if (sample_path && debug_mode) {
+		int last_char = fmt[strlen(fmt) - 1];
+		vprintf(fmt, args);
+		if (last_char != '\n') {
+			printf("\n");
+		}
+		fflush(stdout);
+	} else if (debug_mode) {
 		char stamp[32], prepend[16];
 		time_t now;
 		struct tm *timenow;
@@ -164,6 +331,7 @@ log_msg(int level, char *fmt, ...)
 		timenow = localtime(&now);
 		strftime(stamp, 32, "%b %d %T", timenow);
 		printf("%s ", stamp);
+		fflush(stdout);
 		switch (level) {
 			case LOG_ERR:
 				strcpy(prepend, "ERROR:");
@@ -179,10 +347,13 @@ log_msg(int level, char *fmt, ...)
 				break;
 		}
 		printf("%s ", prepend);
+		fflush(stdout);
 		vprintf(fmt, args);
-		printf("\n");
-	}
-	else {
+		if (fmt[strlen(fmt) - 1] != '\n') {
+			printf("\n");
+			fflush(stdout);
+		}
+	} else {
 		vsyslog(level, fmt, args);
 	}
 	va_end(args);
@@ -340,10 +511,14 @@ update_hugepages()
 	struct dirent *ep;
 	unsigned long newhpages = 0;
 	int rc = -1;
+	char dirname[FILENAME_MAX];
 
-	dp = opendir(HUGEPAGESINFO);
-	if (dp == NULL)
+	memset(dirname, 0, FILENAME_MAX);
+
+	dp = adaptivemm_opendir(HUGEPAGESINFO, dirname);
+	if (dp == NULL) {
 		return rc;
+	}
 
 	while (((ep = readdir(dp)) != NULL) && (ep->d_type == DT_DIR)) {
 		FILE *fp;
@@ -354,7 +529,7 @@ update_hugepages()
 		if (strstr(ep->d_name, "hugepages-") == NULL)
 			continue;
 		snprintf(tmpstr, sizeof(tmpstr), "%s/%s/nr_hugepages",
-				HUGEPAGESINFO, ep->d_name);
+				(strlen(dirname)) ? dirname : HUGEPAGESINFO, ep->d_name);
 		fp = fopen(tmpstr, "r");
 		if (fp == NULL)
 			continue;
@@ -409,7 +584,7 @@ update_zone_watermarks()
 	char *line = malloc(len);
 	int current_node = -1;
 
-	fp = fopen(ZONEINFO, "r");
+	fp = adaptivemm_fopen(ZONEINFO, "r");
 	if (!fp)
 		return 0;
 
@@ -540,7 +715,7 @@ no_pages_reclaimed()
 	unsigned long val, reclaimed;
 	char desc[100];
 
-	fp = fopen(VMSTAT, "r");
+	fp = adaptivemm_fopen(VMSTAT, "r");
 	if (!fp)
 		return 0;
 
@@ -598,7 +773,7 @@ rescale_watermarks(int scale_up)
 	/*
 	 * Get the current watermark scale factor.
 	 */
-	if ((fd = open(RESCALE_WMARK, O_RDONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_RDONLY)) == -1) {
 		log_err("Failed to open "RESCALE_WMARK" (%s)", strerror(errno));
 		return;
 	}
@@ -611,7 +786,6 @@ rescale_watermarks(int scale_up)
 	/* strip off trailing CR from current watermark scale factor */
 	c = index(scaled_wmark, '\n');
 	*c = 0;
-
 	/*
 	 * Compute average high and low watermarks across nodes
 	 */
@@ -783,7 +957,7 @@ rescale_watermarks(int scale_up)
 
 	log_info(1, "New watermark scale factor = %ld", scaled_watermark);
 	sprintf(scaled_wmark, "%ld\n", scaled_watermark);
-	if ((fd = open(RESCALE_WMARK, O_WRONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_WRONLY)) == -1) {
 		log_err("Failed to open "RESCALE_WMARK" (%s)", strerror(errno));
 		return;
 	}
@@ -816,7 +990,7 @@ check_permissions(void)
 	/*
 	 * Make sure running kernel supports watermark_scale_factor file
 	 */
-	if ((fd = open(RESCALE_WMARK, O_RDONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_RDONLY)) == -1) {
 		fprintf(stderr, "Can not open "RESCALE_WMARK" (%s)", strerror(errno));
 		return 0;
 	}
@@ -827,7 +1001,7 @@ check_permissions(void)
 		return 0;
 	}
 	close(fd);
-	if ((fd = open(RESCALE_WMARK, O_WRONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_WRONLY)) == -1) {
 		fprintf(stderr, "Can not open "RESCALE_WMARK" (%s)", strerror(errno));
 		return 0;
 	}
@@ -891,7 +1065,7 @@ update_neg_dentry(bool init)
 	 * this kernel.
 	 */
 	if (access(NEG_DENTRY_LIMIT, F_OK) == 0) {
-		if ((fd = open(NEG_DENTRY_LIMIT, O_RDWR)) == -1) {
+		if ((fd = adaptivemm_open(NEG_DENTRY_LIMIT, O_RDWR)) == -1) {
 			log_err("Failed to open "NEG_DENTRY_LIMIT" (%s)", strerror(errno));
 		} else {
 			/*
@@ -947,12 +1121,15 @@ get_unmapped_pages()
 	ssize_t inbytes1, inbytes2;
 	unsigned long count, unmapped_pages = 0;
 
-	if ((fd1 = open(KPAGECOUNT, O_RDONLY)) == -1) {
+	
+	if ((fd1 = adaptivemm_open(KPAGECOUNT, O_RDONLY)) == -1);
+	if (fd1 <= 0) {
 		log_err("Error opening kpagecount");
 		return -1;
 	}
 
-	if ((fd2 = open(KPAGEFLAGS, O_RDONLY)) == -1) {
+	if ((fd2 = adaptivemm_open(KPAGEFLAGS, O_RDONLY)) == -1);
+	if (fd2 <= 0) {
 		log_err("Error opening kpageflags");
 		return -1;
 	}
@@ -1021,7 +1198,7 @@ pr_meminfo(int level)
 	FILE *fp = NULL;
 	char line[LINE_MAX];
 
-	fp = fopen(MEMINFO, "r");
+	fp = adaptivemm_fopen(MEMINFO, "r");
 	if (!fp)
 		return;
 
@@ -1157,7 +1334,7 @@ check_memory_leak(bool init)
 	/*
 	 * Now read meminfo file to get current memory info
 	 */
-	fp = fopen(MEMINFO, "r");
+	fp = adaptivemm_fopen(MEMINFO, "r");
 	if (!fp)
 		return;
 
@@ -1291,7 +1468,7 @@ check_memory_leak(bool init)
 		prv_free = freemem;
 		for (i = 0; i < NR_MEMDATA_ITEMS; i++)
 			pr_memdata[i] = memdata[i];
-		log_info(5, "Base memory consumption set to %lu K", (base_mem * base_psize));
+		log_info(5, "Base memory consumption set to %lu K, total_hugepages = %ld", (base_mem * base_psize), total_hugepages);
 		goto out;
 	}
 
@@ -1476,7 +1653,8 @@ check_memory_pressure(bool init)
 		last_reclaimed = 0;
 
 		ipath = BUDDYINFO;
-		if ((ifile = fopen(ipath, "r")) == NULL) {
+		ifile = adaptivemm_fopen(ipath, "r");
+		if (!ifile) {
 			log_err("fopen(input file)");
 			bailout(1);
 		}
@@ -1776,8 +1954,12 @@ help_msg(char *progname)
 		    "[-v] "
 		    "[-h] "
 		    "[-s] "
+		    "[-l <max_loops>] "
 		    "[-m <max_gb>] "
 		    "[-a <level>]\n"
+		    "[-C] "
+		    "[-S <capture data path>]\n"
+		    "[-c] "
 		    "Version %s\n"
 		    "Options:\n"
 		    "\t-v\tVerbose mode (use multiple to increase verbosity)\n"
@@ -1786,6 +1968,12 @@ help_msg(char *progname)
 		    "\t-s\tSimulate a run (dry run, implies \"-v -v -d\")\n"
 		    "\t-m\tMaximum allowed gap between high and low watermarks in GB\n"
 		    "\t-a\tAggressiveness level (1=high, 2=normal (default), 3=low)\n"
+		    "\t********** Capture data & Replay flags **********\n"
+		    "\t-C\tCapture data (-S must be set as well)\n"
+		    "\t-R\tReplay data (-S must be set as well)\n"
+		    "\t-S\tPath to sample data diretory (set either -C or -R)\n"
+		    "\t-c\tCapture & Replay data debug\n"
+		    "\t-l\tMaximum loops (debug_mode must be set as well)\n"
 		    "\nNOTE: config options read from configuration file can be overridden\n      with command line options. Configuration file can be\n      %s or %s\n",
 		    progname, VERSION, CONFIG_FILE1, CONFIG_FILE2);
 }
@@ -1799,23 +1987,36 @@ main(int argc, char **argv)
 	int errflag = 0;
 	char tmpbuf[TMPCHARBUFSIZE];
 	struct utsname name;
+	bool replay_data = false;
 
 	openlog("adaptivemmd", LOG_PID, LOG_DAEMON);
 	if (parse_config() == 0)
 		bailout(1);
 
-	while ((c = getopt(argc, argv, "a:m:hsvd")) != -1) {
+	while ((c = getopt(argc, argv, "a:m:hsvdS:CRcl:")) != -1) {
 		switch (c) {
 		case 'a':
 			aggressiveness = atoi(optarg);
 			if ((aggressiveness < 1) || (aggressiveness > 3))
 				aggressiveness = 2;
 			break;
+		case 'l':
+			max_loops = atoi(optarg);
+			break;
 		case 'm':
 			maxgap = atoi(optarg);
 			break;
 		case 'd':
 			debug_mode = 1;
+			break;
+		case 'c':
+			capture_debug = true;
+			break;
+		case 'C':
+			capture_data = true;
+			break;
+		case 'R':
+			replay_data = true;
 			break;
 		case 'v':
 			/* Ignore in case of dry run */
@@ -1826,6 +2027,9 @@ main(int argc, char **argv)
 			dry_run = 1;
 			verbose = 2;
 			debug_mode = 1;
+			break;
+		case 'S':
+			sample_path = optarg;
 			break;
 		case 'h':
 			help_msg(argv[0]);
@@ -1839,6 +2043,37 @@ main(int argc, char **argv)
 	/* Handle signals to ensure proper cleanup */
 	signal(SIGTERM, mysig);
 	signal(SIGHUP, mysig);
+
+	if (debug_mode && sample_path) {
+		if ((capture_data && replay_data) || (!capture_data && !replay_data)) {
+			fprintf(stderr, "Set either -C or -R, but not both.\n");
+			help_msg(argv[0]);
+			bailout(1);
+		}
+		if (capture_data) {
+			if (access(sample_path, F_OK) == 0) {
+				fprintf(stderr, "adaptivemm: %s exists. Sample data dir cannot exist to avoid overwrite.\n", sample_path);
+				bailout(1);
+			} else {
+				char cmdline[FILENAME_MAX];
+
+				sprintf(cmdline, "mkdir -p -m 755 %s", sample_path);
+				if (system(cmdline) < 0) {
+					fprintf(stderr, "adaptivemm: can't create %s, errno=%d\n", sample_path, errno);
+					bailout(1);
+				}
+				if (access(sample_path, F_OK) != 0) {
+					fprintf(stderr, "adaptivemm: Can't find %s\n", sample_path);
+					bailout(1);
+				}
+			}
+		} else {
+			if (access(sample_path, F_OK) != 0) {
+				fprintf(stderr, "adaptivemm: Can't find %s\n", sample_path);
+				bailout(1);
+			}
+		}
+	}
 
 	/* Check if an instance is running already */
 	lockfd = open(LOCKFILE, O_RDWR|O_CREAT|O_EXCL, 0644);
@@ -1911,6 +2146,7 @@ main(int argc, char **argv)
 	}
 
 	update_zone_watermarks();
+	iteration++;	/* iteration 0 is for 1st update_zone_watermarks() */
 
 	/*
 	 * If user specifies a maximum gap value for gap between low
@@ -1931,9 +2167,10 @@ main(int argc, char **argv)
 	 */
 	base_psize = getpagesize()/1024;
 
-	pr_info("adaptivemmd "VERSION" started (verbose=%d, aggressiveness=%d, maxgap=%d)", verbose, aggressiveness, maxgap);
+	pr_info("adaptivemmd "VERSION" started (verbose=%d, debug_mode=%d, aggressiveness=%d, maxgap=%d)", verbose, debug_mode, aggressiveness, maxgap);
 
 	one_time_initializations();
+	iteration++;	/* iteration 1 is for one_time_initializations() */
 
 	while (1) {
 		int retval;
@@ -1955,6 +2192,18 @@ main(int argc, char **argv)
 		check_memory_pressure(false);
 		check_memory_leak(false);
 
+		iteration++;
+		if (debug_mode && max_loops && (iteration > max_loops))
+			break;
+		if (sample_path && replay_data) {
+			if (memleak_check_enabled && (!memory_pressure_check_enabled && !neg_dentry_check_enabled))
+				continue;
+			if (!is_more_samples())
+				break;
+		}
+		if (sample_path && replay_data) {
+			continue;
+		}
 		sleep(periodicity);
 	}
 
