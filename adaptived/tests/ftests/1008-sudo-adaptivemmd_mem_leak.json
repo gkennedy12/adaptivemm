@@ -1,0 +1,32 @@
+{
+	"rules": [
+		{
+			"name": "Check for memory leaks & pressure",
+			"causes": [
+				{
+					"name": "adaptivemmd_causes",
+					"args": {
+						"ENABLE_FREE_PAGE_MGMT": false,
+						"maxgap": 0,
+						"ENABLE_NEG_DENTRY_MGMT": false,
+						"neg_dentry_pct": 15,
+						"ENABLE_MEMLEAK_CHECK": true,
+						"verbose": 5,
+						"debug_mode": 0,
+						"log_file": "./replay.log",
+						"capture_data_dir": "./sample_data/mem_leak_logs"
+					}
+				}
+			],
+			"effects": [
+				{
+					"name": "adaptivemmd_effects",
+					"args": {
+						"verbose": 5,
+						"debug_mode": 1
+					}
+				}
+			]
+		}
+	]
+}
