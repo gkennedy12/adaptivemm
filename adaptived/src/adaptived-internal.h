@@ -148,13 +148,24 @@ int _sort_pid_list(const void *p1, const void *p2);
 struct adaptived_rule *rule_init(const char * const name);
 void rule_destroy(struct adaptived_rule ** rule);
 
+int common_logger_init(void *logger_opts, struct json_object *args_obj);
+int common_logger_main(void *logger_opts);
+void common_logger_exit(void *logger_opts);
+
 /*
  * mem_utils defines
  */
 
-#define PROC_MEMINFO	"/proc/meminfo"
-#define PROC_SLABINFO   "/proc/slabinfo"
-#define PROC_STAT   	"/proc/stat"
+#define PROC_BUDDYINFO		"/proc/buddyinfo"
+#define PROC_ZONEINFO		"/proc/zoneinfo"
+#define PROC_VMSTAT		"/proc/vmstat"
+#define PROC_MEMINFO		"/proc/meminfo"
+#define PROC_KPAGECOUNT		"/proc/kpagecount"
+#define PROC_KPAGEFLAGS		"/proc/kpageflags"
+#define PROC_SLABINFO		"/proc/slabinfo"
+#define PROC_STAT   		"/proc/stat"
+#define PROC_MODULES   		"/proc/modules"
+#define MM_HUGEPAGESINFO	"/sys/kernel/mm/hugepages"
 
 /*
  * mem_utils slabinfo defines
