@@ -36,6 +36,7 @@ if [ "$START_DIR" != "$SCRIPT_DIR" ]; then
 	cp "$SCRIPT_DIR"/*.token "$START_DIR"
 	cp "$SCRIPT_DIR"/*.schedstat "$START_DIR"
 	cp "$SCRIPT_DIR"/*.expected "$START_DIR"
+	cp "$SCRIPT_DIR"/sample_data/*.gz "$START_DIR/sample_data/."
 fi
 
 
@@ -58,6 +59,7 @@ if [ "$START_DIR" != "$SCRIPT_DIR" ]; then
 	rm -f "$START_DIR"/*.expected
 	rm -fr "$START_DIR"/__pycache__
 	rm -f ftests.py.log
+	rm -fr "$START_DIR"/sample_data/*_logs*
 fi
 
 exit $RET

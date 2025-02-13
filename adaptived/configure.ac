@@ -87,6 +87,7 @@ AC_CONFIG_FILES([
 	src/Makefile
 	tests/Makefile
 	tests/ftests/Makefile
+	tests/ftests/sample_data/Makefile
 	tests/gunit/Makefile
 ])
 AC_CONFIG_FILES([dist/adaptived.spec:dist/adaptived.spec.in])

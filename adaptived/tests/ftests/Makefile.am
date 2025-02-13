@@ -21,6 +21,9 @@
 #
 # adaptived tests Makefile.am
 #
+DIST_SUBDIRS = sample_data
+SUBDIRS = $(DIST_SUBDIRS)
+
 TESTS = ftests-wrapper.sh ftests-c-wrapper.sh
 
 EXTRA_DIST_PYTHON_FILES = \
@@ -118,6 +121,8 @@ sudo1004_SOURCES = 1004-sudo-effect-sd_bus_setting_add_int_infinity.c ftests.c
 sudo1005_SOURCES = 1005-sudo-effect-sd_bus_setting_sub_infinity.c ftests.c
 sudo1006_SOURCES = 1006-sudo-effect-sd_bus_setting_set_int_scope.c ftests.c
 sudo1007_SOURCES = 1007-sudo-effect-sd_bus_setting_set_str.c ftests.c
+sudo1008_SOURCES = 1008-sudo-adaptivemmd_mem_leak.c ftests.c
+sudo1009_SOURCES = 1009-sudo-adaptivemmd_watermark.c ftests.c
 
 check_PROGRAMS = \
 	test002 \
@@ -192,7 +197,9 @@ check_PROGRAMS = \
 	sudo1004 \
 	sudo1005 \
 	sudo1006 \
-	sudo1007
+	sudo1007 \
+	sudo1008 \ 
+	sudo1009 
 
 EXTRA_DIST_PYTHON_TESTS = \
 	001-cause-time_of_day.py \
@@ -206,7 +213,9 @@ EXTRA_DIST_SUDO_CFGS = \
 	1004-sudo-effect-sd_bus_setting_add_int_infinity.json \
 	1005-sudo-effect-sd_bus_setting_sub_infinity.json \
 	1006-sudo-effect-sd_bus_setting_set_int_scope.json \
-	1007-sudo-effect-sd_bus_setting_set_str.json
+	1007-sudo-effect-sd_bus_setting_set_str.json \
+	1008-sudo-adaptivemmd_mem_leak.json \
+	1009-sudo-adaptivemmd_watermark.json
 
 EXTRA_DIST_CFGS = \
 	001-cause-time_of_day.json.token \
