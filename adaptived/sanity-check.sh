@@ -20,10 +20,22 @@
 # or visit www.oracle.com if you need additional information or have any
 # questions.
 
+pushd .. >/dev/null
+sudo make clean
+make
+sudo ./adaptivemm_test.sh
+RET=$?
+
+if [[ $RET -ne 0 ]]; then
+	echo "adaptivemm_test.sh failed."
+	exit 1
+fi
+popd >/dev/null
+
 # clean up from a previous run
-make clean
-find . -name "*.gcno" -exec sudo rm '{}' \;
-find . -name "*.gcda" -exec sudo rm '{}' \;
+sudo make clean
+find .. -name "*.gcno" -exec sudo rm '{}' \;
+find .. -name "*.gcda" -exec sudo rm '{}' \;
 
 ./autogen.sh
 RET=$?
@@ -41,7 +53,7 @@ if [[ $RET -ne 0 ]]; then
 	exit $RET
 fi
 
-make distcheck
+make -j$(nproc) distcheck
 RET=$?
 
 if [[ $RET -ne 0 ]]; then
@@ -60,7 +72,7 @@ fi
 # I'm not fond of running all of the tests as root, but the sd-bus tests
 # need administrative privileges.  Merging the non-sudo and sudo code
 # coverage files is difficult.  Let's avoid that.
-sudo make check
+sudo make -j$(nproc) check
 RET=$?
 
 if [[ $RET -ne 0 ]]; then
