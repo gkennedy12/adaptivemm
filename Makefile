@@ -10,8 +10,8 @@ all: adaptivemmd
 predict.o: predict.c predict.h
 	$(CC) -c -o $@ $< $(CFLAGS)
 
-adaptivemmd.o: adaptivemmd.c predict.h
-	$(CC) -c -o $@ $< $(CFLAGS)
+adaptivemmd.o: adaptivemmd.c predict.h adaptivemm_opts.h
+	$(CC) -c -DSTANDALONE -o $@ $< $(CFLAGS)
 
 adaptivemmd: $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)

@@ -44,69 +44,74 @@
 #include <linux/kernel-page-flags.h>
 #include "predict.h"
 
-#define VERSION		"2.1.0"
+#include "adaptivemm_opts.h"
+
+#define VERSION		"2.1.X"
 
 #define LOCKFILE	"/var/run/adaptivemmd.pid"
-/*
- * System files that provide information
- */
-#define	BUDDYINFO		"/proc/buddyinfo"
-#define ZONEINFO		"/proc/zoneinfo"
-#define VMSTAT			"/proc/vmstat"
-#define MEMINFO			"/proc/meminfo"
-#define KPAGECOUNT		"/proc/kpagecount"
-#define KPAGEFLAGS		"/proc/kpageflags"
-#define MODULES			"/proc/modules"
-#define HUGEPAGESINFO		"/sys/kernel/mm/hugepages"
 
-/*
- * System files to control reclamation and compaction
- */
-#define RESCALE_WMARK		"/proc/sys/vm/watermark_scale_factor"
-#define	COMPACT_PATH_FORMAT	"/sys/devices/system/node/node%d/compact"
+enum memdata_items {
+	MEMAVAIL,
+	BUFFERS,
+	CACHED,
+	SWPCACHED,
+	UNEVICTABLE,
+	MLOCKED,
+	ANONPAGES,
+	MAPPED,
+	SHMEM,
+	KRECLAIMABLE,
+	SLAB,
+	SUNRECLAIM,
+	KSTACK,
+	PGTABLE,
+	SECPGTABLE,
+	VMALLOCUSED,
+	CMA,
+	NR_MEMDATA_ITEMS
+};
 
-/*
- * System files to control negative dentries
- */
-#define NEG_DENTRY_LIMIT	"/proc/sys/fs/negative-dentry-limit"
+char * const memdata_item_name[NR_MEMDATA_ITEMS] = {
+	"MemAvailable",
+	"Buffers",
+	"Cached",
+	"SwapCached",
+	"Unevicatble",
+	"Mlocked",
+	"AnonPages",
+	"Mapped",
+	"Shmem",
+	"Kreclaimable",
+	"Slab",
+	"Sunreclaim",
+	"KernelStack",
+	"PageTables",
+	"SecPageTables",
+	"VmallocUsed",
+	"CmaTotal"
+};
 
-/*
- * Possible locations for configuration files
- */
-#define CONFIG_FILE1		"/etc/sysconfig/adaptivemmd"
-#define CONFIG_FILE2		"/etc/default/adaptivemmd"
-
-#define MAX_NUMANODES	1024
-
-#define MAX_VERBOSE	5
-#define MAX_AGGRESSIVE	3
-#define MAX_NEGDENTRY	100
-
-/*
- * Number of consecutive samples showing growth in unaccounted memory
- * that will trigger memory leak warning
- */
-#define UNACCT_MEM_GRTH_MAX	10
-
-/* Minimum % change in meminfo numbers to trigger warnings */
-#define MEM_TRIGGER_DELTA	10
-
-unsigned long min_wmark[MAX_NUMANODES], low_wmark[MAX_NUMANODES];
-unsigned long high_wmark[MAX_NUMANODES], managed_pages[MAX_NUMANODES];
+int *compaction_requested;
+unsigned long *last_bigpages;
+unsigned long *min_wmark, *low_wmark;
+unsigned long *high_wmark, *managed_pages;
 unsigned long total_free_pages, total_cache_pages, total_hugepages, base_psize;
 long compaction_rate, reclaim_rate;
-struct lsq_struct page_lsq[MAX_NUMANODES][MAX_ORDER];
+struct lsq_struct **page_lsq;
 int dry_run;
 int debug_mode, verbose, del_lock = 0;
 unsigned long maxgap;
-int aggressiveness = 2;
+int aggressiveness = 3;
 int periodicity, skip_dmazone;
 int neg_dentry_pct = 15;	/* default is 1.5% */
+int iteration;
 
 /* Flags to enable various modules */
 bool memory_pressure_check_enabled = true;
 bool neg_dentry_check_enabled = true;
 bool memleak_check_enabled = true;
+
+int max_numanodes;
 
 /*
  * Highest value to set watermark_scale_factor to. This value is tied
@@ -149,43 +154,330 @@ mysig(int signo)
 	bailout(0);
 }
 
+char *log_file;
+char *sample_path;
+static bool sample_data_debug = false;
+
+int adaptivemm_open(const char *pathname, int flags)
+{
+	char new_path[FILENAME_MAX];
+
+	if (!pathname)
+		return 0;
+	if (!sample_path)
+		return(open(pathname, flags));
+	if (sample_data_debug)
+		log_info(5, "\nadaptivemm_open: %s 0x%o\n", pathname, flags);
+	if (strcmp(pathname, KPAGECOUNT) == 0) {
+		sprintf(new_path, "%s/kpagecount.%d", sample_path, iteration);
+	} else if (strcmp(pathname, KPAGEFLAGS) == 0) {
+		sprintf(new_path, "%s/kpageflags.%d", sample_path, iteration);
+        } else if (strcmp(pathname, RESCALE_WMARK) == 0) {
+                sprintf(new_path, "%s/rescale_wmark.%d", sample_path, iteration);
+        } else if (strcmp(pathname, NEG_DENTRY_LIMIT) == 0) {
+                sprintf(new_path, "%s/neg_dentry_limit.%d", sample_path, iteration);
+	} else {
+		log_info(5, "adaptivemm_open: does not currently handle: %s\n", pathname);
+		memcpy(new_path, pathname, strlen(pathname));
+	}
+	if (sample_data_debug)
+		log_info(5, "adaptivemm_open: %s\n", new_path);
+
+	return(open(new_path, flags));
+}
+
+FILE *adaptivemm_fopen(const char *pathname, const char *mode)
+{
+	char new_path[FILENAME_MAX];
+
+	if (!pathname)
+		return NULL;
+	if (!sample_path)
+		return(fopen(pathname, mode));
+
+	if (sample_data_debug)
+		log_info(5, "\nadaptivemm_fopen: %s, %s\n", pathname, mode);
+	if (strcmp(pathname, BUDDYINFO) == 0) {
+		sprintf(new_path, "%s/buddyinfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, ZONEINFO) == 0) {
+		sprintf(new_path, "%s/zoneinfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, VMSTAT) == 0) {
+		sprintf(new_path, "%s/vmstat.%d", sample_path, iteration);
+	} else if (strcmp(pathname, MEMINFO) == 0) {
+		sprintf(new_path, "%s/meminfo.%d", sample_path, iteration);
+	} else if (strcmp(pathname, MODULES) == 0) {
+		sprintf(new_path, "%s/modules.%d", sample_path, iteration);
+	} else {
+		log_info(5, "adaptivemm_fopen: does not currently handle: %s\n", pathname);
+		memcpy(new_path, pathname, strlen(pathname));
+	}
+	if (access(new_path, F_OK) != 0) {
+		log_info(5, "adaptivemm_fopen: can't find %s\n", new_path);
+		return NULL;
+	}
+
+	if (sample_data_debug)
+		log_info(5, "adaptivemm_fopen: %s\n", new_path);
+	return(fopen(new_path, mode));
+}
+
+DIR *adaptivemm_opendir(const char *pathname, char *dirname)
+{
+	char new_path[LINE_MAX];
+
+	if (!sample_path)
+		return(opendir(pathname));
+
+	if (!pathname || !dirname)
+		return NULL;
+
+	if (sample_data_debug)
+		log_info(5, "\nadaptivemm_opendir: %s\n", pathname);
+	if (sample_path && strcmp(pathname, HUGEPAGESINFO) == 0)
+		sprintf(new_path, "%s/hugepages.%d", sample_path, iteration);
+	else
+		return NULL;
+	memcpy(dirname, new_path, strlen(new_path));
+	if (access(new_path, F_OK) != 0) {
+		log_info(5, "adaptivemm_opendir: can't find %s\n", new_path);
+		return NULL;
+	}
+	if (sample_data_debug)
+		log_info(5, "adaptivemm_opendir: %s\n", new_path);
+	return(opendir(new_path));
+}
+
+#ifdef STANDALONE
+
+/* Used during testing to compare messages against orignal adaptivemmd messages */
+static void log_msg_to_file(char *buf)
+{
+	FILE *destFile;
+	int ret;
+
+	if (!log_file)
+		return;
+
+        destFile = fopen(log_file, "a");
+        if (destFile == NULL) {
+                fprintf(stderr, "log_msg_to_file: Error opening log file %s.\n", log_file);
+		return;
+        }
+	ret = fwrite(buf, 1, strlen(buf), destFile);
+	if (ret <= 0)
+		fprintf(stderr, "log_msg_to_file: write failed: %d\n", errno);
+
+        fclose(destFile);
+}
+
 void
 log_msg(int level, char *fmt, ...)
 {
 	va_list args;
 
 	va_start(args, fmt);
-	if (debug_mode) {
-		char stamp[32], prepend[16];
-		time_t now;
-		struct tm *timenow;
+	if (log_file) {
+		char buf[FILENAME_MAX];
 
-		now = time(NULL);
-		timenow = localtime(&now);
-		strftime(stamp, 32, "%b %d %T", timenow);
-		printf("%s ", stamp);
-		switch (level) {
-			case LOG_ERR:
-				strcpy(prepend, "ERROR:");
-				break;
-			case LOG_WARNING:
-				strcpy(prepend, "Warning:");
-				break;
-			case LOG_INFO:
-				strcpy(prepend, "Info:");
-				break;
-			case LOG_DEBUG:
-				strcpy(prepend, "Debug:");
-				break;
-		}
-		printf("%s ", prepend);
-		vprintf(fmt, args);
-		printf("\n");
+		memset(buf, 0, FILENAME_MAX);
+		vsnprintf(&buf[strlen(buf)], FILENAME_MAX - strlen(buf) - 1, fmt, args);
+		if (buf[strlen(buf) - 1] != '\n')
+			buf[strlen(buf)] = '\n';
+		log_msg_to_file(buf);
+		return;
 	}
-	else {
-		vsyslog(level, fmt, args);
-	}
-	va_end(args);
+        if (debug_mode) {
+                char stamp[32], prepend[16];
+                time_t now;
+                struct tm *timenow;
+
+                now = time(NULL);
+                timenow = localtime(&now);
+                strftime(stamp, 32, "%b %d %T", timenow);
+                printf("%s ", stamp);
+                switch (level) {
+                        case LOG_ERR:
+                                strcpy(prepend, "ERROR:");
+                                break;
+                        case LOG_WARNING:
+                                strcpy(prepend, "Warning:");
+                                break;
+                        case LOG_INFO:
+                                strcpy(prepend, "Info:");
+                                break;
+                        case LOG_DEBUG:
+                                strcpy(prepend, "Debug:");
+                                break;
+                }
+                printf("%s ", prepend);
+                vprintf(fmt, args);
+                printf("\n");
+        }
+        else {
+                vsyslog(level, fmt, args);
+        }
+        va_end(args);
+}
+#else
+
+#include "include/adaptived.h"
+
+/* Used during testing to compare messages against orignal adaptivemmd messages */
+static void log_msg_to_file(char *buf)
+{
+        FILE *destFile;
+        int ret;
+
+        if (!log_file)
+                return;
+
+        destFile = fopen(log_file, "a");
+        if (destFile == NULL) {
+                adaptived_err("log_msg_to_file: Error opening log file %s.\n", log_file);
+                return;
+        }
+        ret = fwrite(buf, 1, strlen(buf), destFile);
+        if (ret <= 0)
+                adaptived_err("log_msg_to_file: write failed: %d\n", errno);
+
+        fclose(destFile);
+}
+
+void
+log_msg(int level, char *fmt, ...)
+{
+        va_list args;
+        va_start (args, fmt);
+        char buf[FILENAME_MAX];
+
+        memset(buf, 0, FILENAME_MAX);
+        vsnprintf(&buf[strlen(buf)], FILENAME_MAX - strlen(buf) - 1, fmt, args);
+	if (buf[strlen(buf) - 1] != '\n')
+		buf[strlen(buf)] = '\n';
+        switch (level) {
+                case LOG_ERR:
+                        if (log_file)
+                                log_msg_to_file(buf);
+                        adaptived_err(buf);
+                        break;
+                case LOG_WARNING:
+                        if (log_file)
+                                log_msg_to_file(buf);
+                        adaptived_wrn(buf);
+                        break;
+                case LOG_INFO:
+                        if (log_file)
+                                log_msg_to_file(buf);
+                        adaptived_info(buf);
+                        break;
+                case LOG_DEBUG:
+                        if (log_file)
+                                log_msg_to_file(buf);
+                        adaptived_dbg(buf);
+                        break;
+        }
+        va_end (args);
+}
+#endif
+
+int get_max_numa_nodes()
+{
+        int fd, br, max_numa = 0;
+        char buffer[LINE_MAX];
+        char *subp;
+
+        fd = open("/sys/devices/system/node/online", O_RDONLY);
+        if (fd <= 0) {
+                return -errno;
+        }
+        memset(buffer, 0, LINE_MAX);
+        br = read(fd, buffer, LINE_MAX);
+        close(fd);
+        if (br <= 0) {
+                return -errno;
+        }
+
+        subp = strstr(buffer, "-");
+        if (subp) {
+                max_numa = strtol(++subp, 0, 0);
+        }
+        max_numa++;
+
+        return max_numa;
+}
+
+void free_numa_arrays(struct adaptivemmd_opts * const opts)
+{
+        if (opts->compaction_requested)
+                free(opts->compaction_requested);
+        if (opts->last_bigpages)
+                free(opts->last_bigpages);
+        if (opts->min_wmark)
+                free(opts->min_wmark);
+        if (opts->low_wmark)
+                free(opts->low_wmark);
+        if (opts->high_wmark)
+                free(opts->high_wmark);
+        if (opts->managed_pages)
+                free(opts->managed_pages);
+        if (opts->page_lsq) {
+                for (int i = 0; i < opts->max_numa_nodes; i++) {
+                        free(opts->page_lsq[i]);
+                }
+                free(opts->page_lsq);
+        }
+}
+
+int setup_numa_arrays(struct adaptivemmd_opts * const opts)
+{
+        opts->max_numa_nodes = get_max_numa_nodes();
+
+        if (opts->max_numa_nodes < 1) {
+                fprintf(stderr, "adaptivemmd_main: opts->max_numa_nodes %d invalid.\n", opts->max_numa_nodes);
+		goto error;
+        }
+#if 0
+	max_numanodes = opts->max_numa_nodes;
+#else
+	max_numanodes = 1;
+#endif
+
+        opts->compaction_requested = calloc(opts->max_numa_nodes, sizeof(int));
+	if (!opts->compaction_requested)
+		goto error;
+        opts->last_bigpages = calloc(opts->max_numa_nodes, sizeof(unsigned long));
+	if (!opts->last_bigpages)
+		goto error;
+        opts->min_wmark = calloc(opts->max_numa_nodes, sizeof(unsigned long));
+	if (!opts->min_wmark)
+		goto error;
+        opts->low_wmark = calloc(opts->max_numa_nodes, sizeof(unsigned long));
+	if (!opts->low_wmark)
+		goto error;
+        opts->high_wmark = calloc(opts->max_numa_nodes, sizeof(unsigned long));
+	if (!opts->high_wmark)
+		goto error;
+        opts->managed_pages = calloc(opts->max_numa_nodes, sizeof(unsigned long));
+	if (!opts->managed_pages)
+		goto error;
+
+        opts->page_lsq = calloc(opts->max_numa_nodes, sizeof(struct lsq_struct));
+	if (!opts->page_lsq)
+		goto error;
+        for (int i = 0; i < opts->max_numa_nodes; i++) {
+                opts->page_lsq[i] = (struct lsq_struct *)calloc(sizeof(struct lsq_struct), MAX_ORDER);
+        }
+	compaction_requested = opts->compaction_requested;
+	last_bigpages = opts->last_bigpages;
+	min_wmark = opts->min_wmark;
+	low_wmark = opts->low_wmark;
+	high_wmark = opts->high_wmark;
+	managed_pages = opts->managed_pages;
+	page_lsq = opts->page_lsq;
+
+	return 0;
+error:
+	return -1;
 }
 
 /*
@@ -204,7 +496,7 @@ compact(int node_id)
 		bailout(1);
 	}
 
-	if ((fd = open(compactpath, O_WRONLY|O_NONBLOCK)) == -1) {
+	if ((fd = adaptivemm_open(compactpath, O_WRONLY|O_NONBLOCK)) == -1) {
 		log_err("opening compaction path (%s)", strerror(errno));
 		bailout(1);
 	}
@@ -224,11 +516,11 @@ compact(int node_id)
 int
 scan_buddyinfo(char *line, char *node, char *zone, unsigned long *nr_free)
 {
-	char copy[LINE_MAX];
+	char copy[LINE_MAX + 1];
 	unsigned int order;
 	char *t;
 
-	(void) strncpy(copy, line, sizeof(copy));
+	(void) strncpy(copy, line, LINE_MAX);
 
 	if ((t = strtok(copy, " ")) == NULL || strcmp(t, "Node") ||
 	    (t = strtok(NULL, ",")) == NULL || sscanf(t, "%s", node) != 1 ||
@@ -340,21 +632,25 @@ update_hugepages()
 	struct dirent *ep;
 	unsigned long newhpages = 0;
 	int rc = -1;
+	char dirname[LINE_MAX];
 
-	dp = opendir(HUGEPAGESINFO);
+        memset(dirname, 0, LINE_MAX);
+
+	dp = adaptivemm_opendir(HUGEPAGESINFO, dirname);
+
 	if (dp == NULL)
 		return rc;
 
 	while (((ep = readdir(dp)) != NULL) && (ep->d_type == DT_DIR)) {
 		FILE *fp;
 		long pages, psize;
-		char tmpstr[312];
+		char tmpstr[FILENAME_MAX];
 
 		/* Check if it is one of the hugepages dir */
 		if (strstr(ep->d_name, "hugepages-") == NULL)
 			continue;
 		snprintf(tmpstr, sizeof(tmpstr), "%s/%s/nr_hugepages",
-				HUGEPAGESINFO, ep->d_name);
+                        (strlen(dirname)) ? dirname : HUGEPAGESINFO, ep->d_name);
 		fp = fopen(tmpstr, "r");
 		if (fp == NULL)
 			continue;
@@ -409,7 +705,7 @@ update_zone_watermarks()
 	char *line = malloc(len);
 	int current_node = -1;
 
-	fp = fopen(ZONEINFO, "r");
+	fp = adaptivemm_fopen(ZONEINFO, "r");
 	if (!fp)
 		return 0;
 
@@ -417,7 +713,7 @@ update_zone_watermarks()
 		if (strncmp(line, "Node", 4) == 0) {
 			char node[FLDLEN], zone[FLDLEN], zone_name[FLDLEN];
 			int nid;
-			unsigned long min, low, high, managed;
+			unsigned long min = 0, low = 0, high = 0, managed = 0;
 
 			if (sscanf(line, "%s %d, %s %8s\n", node, &nid, zone, zone_name) <= 0)
 				goto out;
@@ -502,7 +798,7 @@ rescale_maxwsf()
 	if (total_hugepages == 0)
 		return;
 
-	for (i = 0; i < MAX_NUMANODES; i++)
+	for (i = 0; i < max_numanodes; i++)
 		total_managed += managed_pages[i];
 	if (total_managed == 0) {
 		log_info(1, "Number of managed pages is 0");
@@ -540,7 +836,7 @@ no_pages_reclaimed()
 	unsigned long val, reclaimed;
 	char desc[100];
 
-	fp = fopen(VMSTAT, "r");
+        fp = adaptivemm_fopen(VMSTAT, "r");
 	if (!fp)
 		return 0;
 
@@ -578,7 +874,7 @@ rescale_watermarks(int scale_up)
 	unsigned long total_managed = 0;
 	unsigned long mmark, lmark, hmark;
 
-	for (i = 0; i < MAX_NUMANODES; i++)
+	for (i = 0; i < max_numanodes; i++)
 		total_managed += managed_pages[i];
 	/*
 	 * Hugepages should not be taken into account for watermark
@@ -598,7 +894,7 @@ rescale_watermarks(int scale_up)
 	/*
 	 * Get the current watermark scale factor.
 	 */
-	if ((fd = open(RESCALE_WMARK, O_RDONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_RDONLY)) == -1) {
 		log_err("Failed to open "RESCALE_WMARK" (%s)", strerror(errno));
 		return;
 	}
@@ -616,7 +912,7 @@ rescale_watermarks(int scale_up)
 	 * Compute average high and low watermarks across nodes
 	 */
 	lmark = hmark = count = 0;
-	for (i = 0; i < MAX_NUMANODES; i++) {
+	for (i = 0; i < max_numanodes; i++) {
 		lmark += low_wmark[i];
 		hmark += high_wmark[i];
 		if (low_wmark[i] != 0)
@@ -735,7 +1031,7 @@ rescale_watermarks(int scale_up)
 		unsigned long new_lmark;
 
 		mmark = lmark = 0;
-		for (i = 0; i < MAX_NUMANODES; i++) {
+		for (i = 0; i < max_numanodes; i++) {
 			mmark += min_wmark[i];
 			lmark += low_wmark[i];
 		}
@@ -783,7 +1079,7 @@ rescale_watermarks(int scale_up)
 
 	log_info(1, "New watermark scale factor = %ld", scaled_watermark);
 	sprintf(scaled_wmark, "%ld\n", scaled_watermark);
-	if ((fd = open(RESCALE_WMARK, O_WRONLY)) == -1) {
+	if ((fd = adaptivemm_open(RESCALE_WMARK, O_WRONLY)) == -1) {
 		log_err("Failed to open "RESCALE_WMARK" (%s)", strerror(errno));
 		return;
 	}
@@ -807,7 +1103,7 @@ get_msecs(struct timespec *spec)
  * check_permissions() - Check all required permissions for this program to
  *			run successfully
  */
-static int
+int
 check_permissions(void)
 {
 	int fd;
@@ -816,7 +1112,7 @@ check_permissions(void)
 	/*
 	 * Make sure running kernel supports watermark_scale_factor file
 	 */
-	if ((fd = open(RESCALE_WMARK, O_RDONLY)) == -1) {
+        if ((fd = adaptivemm_open(RESCALE_WMARK, O_RDONLY)) == -1) {
 		fprintf(stderr, "Can not open "RESCALE_WMARK" (%s)", strerror(errno));
 		return 0;
 	}
@@ -827,7 +1123,7 @@ check_permissions(void)
 		return 0;
 	}
 	close(fd);
-	if ((fd = open(RESCALE_WMARK, O_WRONLY)) == -1) {
+        if ((fd = adaptivemm_open(RESCALE_WMARK, O_WRONLY)) == -1) {
 		fprintf(stderr, "Can not open "RESCALE_WMARK" (%s)", strerror(errno));
 		return 0;
 	}
@@ -891,7 +1187,7 @@ update_neg_dentry(bool init)
 	 * this kernel.
 	 */
 	if (access(NEG_DENTRY_LIMIT, F_OK) == 0) {
-		if ((fd = open(NEG_DENTRY_LIMIT, O_RDWR)) == -1) {
+                if ((fd = adaptivemm_open(NEG_DENTRY_LIMIT, O_RDWR)) == -1) {
 			log_err("Failed to open "NEG_DENTRY_LIMIT" (%s)", strerror(errno));
 		} else {
 			/*
@@ -902,7 +1198,7 @@ update_neg_dentry(bool init)
 			unsigned long reclaimable_pages, total_managed = 0;
 			char neg_dentry[LINE_MAX];
 
-			for (i = 0; i < MAX_NUMANODES; i++)
+			for (i = 0; i < max_numanodes; i++)
 				total_managed += managed_pages[i];
 			reclaimable_pages = total_managed - total_hugepages;
 			val = (reclaimable_pages * neg_dentry_pct)/total_managed;
@@ -947,12 +1243,12 @@ get_unmapped_pages()
 	ssize_t inbytes1, inbytes2;
 	unsigned long count, unmapped_pages = 0;
 
-	if ((fd1 = open(KPAGECOUNT, O_RDONLY)) == -1) {
+	if ((fd1 = adaptivemm_open(KPAGECOUNT, O_RDONLY)) == -1) {
 		log_err("Error opening kpagecount");
 		return -1;
 	}
 
-	if ((fd2 = open(KPAGEFLAGS, O_RDONLY)) == -1) {
+	if ((fd2 = adaptivemm_open(KPAGEFLAGS, O_RDONLY)) == -1) {
 		log_err("Error opening kpageflags");
 		return -1;
 	}
@@ -1021,7 +1317,7 @@ pr_meminfo(int level)
 	FILE *fp = NULL;
 	char line[LINE_MAX];
 
-	fp = fopen(MEMINFO, "r");
+        fp = adaptivemm_fopen(MEMINFO, "r");
 	if (!fp)
 		return;
 
@@ -1031,47 +1327,6 @@ pr_meminfo(int level)
 	fclose(fp);
 
 }
-
-enum memdata_items {
-	MEMAVAIL,
-	BUFFERS,
-	CACHED,
-	SWPCACHED,
-	UNEVICTABLE,
-	MLOCKED,
-	ANONPAGES,
-	MAPPED,
-	SHMEM,
-	KRECLAIMABLE,
-	SLAB,
-	SUNRECLAIM,
-	KSTACK,
-	PGTABLE,
-	SECPGTABLE,
-	VMALLOCUSED,
-	CMA,
-	NR_MEMDATA_ITEMS
-};
-
-char * const memdata_item_name[NR_MEMDATA_ITEMS] = {
-	"MemAvailable",
-	"Buffers",
-	"Cached",
-	"SwapCached",
-	"Unevicatble",
-	"Mlocked",
-	"AnonPages",
-	"Mapped",
-	"Shmem",
-	"Kreclaimable",
-	"Slab",
-	"Sunreclaim",
-	"KernelStack",
-	"PageTables",
-	"SecPageTables",
-	"VmallocUsed",
-	"CmaTotal"
-};
 
 /*
  * cmp_meminfo() - Compare two instances of meminfo data and print the ones
@@ -1129,7 +1384,7 @@ cmp_meminfo(int level, unsigned long *memdata, unsigned long *pr_memdata)
  * can be updated if (MemTotal - mem_good) drops below previous
  * baseline.
  */
-void
+int
 check_memory_leak(bool init)
 {
 	static unsigned long base_mem, mem_remain, gr_count, prv_free;
@@ -1140,16 +1395,16 @@ check_memory_leak(bool init)
 	long unmapped_pages;
 	FILE *fp = NULL;
 	char line[LINE_MAX];
-	unsigned long val, inuse_mem, freemem, unacct_mem, mem_total;
+	unsigned long val, inuse_mem, freemem = 0, unacct_mem, mem_total = 0;
 	char desc[LINE_MAX];
+	int trigger_type = 0;
 
 	/*
 	 * bail out if this module is not enabled
 	 */
 	if (!memleak_check_enabled)
-		return;
-
-	for (i = 0; i < MAX_NUMANODES; i++)
+		return 0;
+	for (i = 0; i < max_numanodes; i++)
 		total_managed += managed_pages[i];
 	for (i = 0; i < NR_MEMDATA_ITEMS; i++)
 		memdata[i] = 0;
@@ -1157,9 +1412,9 @@ check_memory_leak(bool init)
 	/*
 	 * Now read meminfo file to get current memory info
 	 */
-	fp = fopen(MEMINFO, "r");
+        fp = adaptivemm_fopen(MEMINFO, "r");
 	if (!fp)
-		return;
+		return -EIO;
 
 	/*
 	 * Compute amount of memory accounted for since it is clearly in
@@ -1291,7 +1546,8 @@ check_memory_leak(bool init)
 		prv_free = freemem;
 		for (i = 0; i < NR_MEMDATA_ITEMS; i++)
 			pr_memdata[i] = memdata[i];
-		log_info(5, "Base memory consumption set to %lu K", (base_mem * base_psize));
+		log_info(5, "Base memory consumption set to %lu K, total_hugepages = %ld",
+			(base_mem * base_psize), total_hugepages);
 		goto out;
 	}
 
@@ -1338,7 +1594,8 @@ check_memory_leak(bool init)
 	else
 		unacct_mem = 0;
 
-	log_info(5, "Unaccounted memory = %lu K, freemem = %lu K, memavail = %lu K", (unacct_mem * base_psize), (freemem * base_psize), (memdata[MEMAVAIL] * base_psize));
+	log_info(5, "Unaccounted memory = %lu K, freemem = %lu K, memavail = %lu K",
+		(unacct_mem * base_psize), (freemem * base_psize), (memdata[MEMAVAIL] * base_psize));
 
 	/*
 	 * If unaccounted for memory grew by more than warning trigger
@@ -1370,6 +1627,7 @@ check_memory_leak(bool init)
 				(prv_free * base_psize));
 			pr_meminfo(1);
 			cmp_meminfo(1, memdata, pr_memdata);
+			trigger_type = SUDDEN_MEMORY_LEAK_TRIGGER;
 		} else {
 			log_info(5, "Background memory use grew by more than %d (%lu -> %lu) K, unmapped memory = %lu K, freemem = %lu K, freemem previously = %lu K, MemAvail = %lu K", MEM_TRIGGER_DELTA,
 				(mem_remain * base_psize),
@@ -1379,6 +1637,7 @@ check_memory_leak(bool init)
 				(prv_free * base_psize),
 				(memdata[MEMAVAIL] * base_psize));
 			cmp_meminfo(1, memdata, pr_memdata);
+			trigger_type = BACKGROUND_MEMORY_LEAK_TRIGGER;
 		}
 		mem_remain = unacct_mem;
 	} else if (unacct_mem < (mem_remain * ((100-MEM_TRIGGER_DELTA)/100))){
@@ -1402,6 +1661,7 @@ check_memory_leak(bool init)
 		pr_meminfo(1);
 		cmp_meminfo(1, memdata, pr_memdata);
 		gr_count = 0;
+		trigger_type = SLOW_MEMORY_LEAK_TRIGGER;
 	}
 
 out:
@@ -1411,6 +1671,8 @@ out:
 	prv_free = freemem;
 	for (i = 0; i < NR_MEMDATA_ITEMS; i++)
 		pr_memdata[i] = memdata[i];
+
+	return trigger_type;
 }
 
 /*
@@ -1443,11 +1705,10 @@ updates_for_hugepages(int delta)
  *		may choose to perform only initiazations when this flag
  *		is set
  */
-void
+int
 check_memory_pressure(bool init)
 {
-	static int compaction_requested[MAX_NUMANODES];
-	static unsigned long last_bigpages[MAX_NUMANODES], last_reclaimed;
+	static unsigned long last_reclaimed;
 	static FILE *ifile;
 	unsigned long nr_free[MAX_ORDER];
 	struct frag_info free[MAX_ORDER];
@@ -1456,32 +1717,31 @@ check_memory_pressure(bool init)
 	int i, order, nid, retval;
 	struct timespec spec, spec_after;
 	static struct timespec spec_before;
-	char *ipath;
+	int trigger_type = 0;
 
 	/*
 	 * bail out if this module is not enabled
 	 */
 	if (!memory_pressure_check_enabled)
-		return;
+		return 0;
 
 	if (init) {
 		/*
 		 * Initialize number of higher order pages seen in last scan
 		 * and compaction requested per node
 		 */
-		for (i = 0; i < MAX_NUMANODES; i++) {
+		for (i = 0; i < max_numanodes; i++) {
 			last_bigpages[i] = 0;
 			compaction_requested[i] = 0;
 		}
 		last_reclaimed = 0;
 
-		ipath = BUDDYINFO;
-		if ((ifile = fopen(ipath, "r")) == NULL) {
+		if ((ifile = adaptivemm_fopen(BUDDYINFO, "r")) == NULL) {
 			log_err("fopen(input file)");
-			bailout(1);
+			return -EIO;
 		}
 
-		return;
+		return 0;
 	}
 
 	/*
@@ -1555,6 +1815,7 @@ check_memory_pressure(bool init)
 					compaction_requested[nid] = 1;
 					result &= ~MEMPREDICT_COMPACT;
 				}
+				trigger_type = MEMORY_PRESSURE_TRIGGER;
 			}
 		}
 		/*
@@ -1574,9 +1835,8 @@ check_memory_pressure(bool init)
 
 	if (retval == ERR) {
 		log_err("error reading buddyinfo (%s)", strerror(errno));
-		bailout(1);
+		return -errno;
 	}
-
 
 	/*
 	 * Adjust watermarks if needed. Both MEMPREDICT_RECLAIM
@@ -1612,6 +1872,8 @@ check_memory_pressure(bool init)
 	 * fit algorithm.
 	 */
 	clock_gettime(CLOCK_MONOTONIC_RAW, &spec_before);
+
+	return trigger_type;
 }
 
 /*
@@ -1619,7 +1881,7 @@ check_memory_pressure(bool init)
  *	adaptivemmd startup
  *
  */
-void
+int
 one_time_initializations()
 {
 	/*
@@ -1629,10 +1891,52 @@ one_time_initializations()
 	update_hugepages();
 
 	update_neg_dentry(true);
-	check_memory_pressure(true);
-	check_memory_leak(true);
+	if (check_memory_pressure(true) < 0)
+		return -1;
+	if (check_memory_leak(true) < 0)
+		return -1;
+	iteration++;
+	return 0;
 }
 
+int
+run_memory_checks()
+{
+	int retval;		/* contains trigger type or error */
+	int trigger_type = 0;
+
+	/*
+	 * Start with updated zone watermarks and number of hugepages
+	 * allocated since these can be adjusted by user any time.
+	 * Update maxwsf to account for hugepages just in case
+	 * number of hugepages changed unless user already gave
+	 * a maxgap value.
+	 */
+	update_zone_watermarks();
+	retval = update_hugepages();
+	if (retval > 0)
+		updates_for_hugepages(retval);
+	if (maxgap == 0)
+		rescale_maxwsf();
+
+	retval = check_memory_pressure(false);
+	if (retval < 0)
+		return retval;
+
+	trigger_type = retval;
+
+	retval = check_memory_leak(false);
+	if (retval < 0)
+		return retval;
+
+	trigger_type |= retval;
+
+	iteration++;    /* needed for replay sample data */
+
+	return trigger_type;
+}
+
+#ifdef STANDALONE
 /*
  * parse_config() - Parse the configuration file CONFIG_FILE1 or CONFIG_FILE2
  *
@@ -1653,7 +1957,7 @@ one_time_initializations()
 #define OPT_NEG_DENTRY2	"NEG_DENTRY_CAP"
 #define OPT_ENB_MEMLEAK	"ENABLE_MEMLEAK_CHECK"
 
-int
+static int
 parse_config()
 {
 	FILE *fstream;
@@ -1766,6 +2070,7 @@ nextline:
 	fclose(fstream);
 	return 1;
 }
+#endif /* STANDALONE */
 
 void
 help_msg(char *progname)
@@ -1778,6 +2083,9 @@ help_msg(char *progname)
 		    "[-s] "
 		    "[-m <max_gb>] "
 		    "[-a <level>]\n"
+		    "[-S <sample_data_path>]\n"
+		    "[-L <log_file_path>]\n"
+		    "[-E <enables (4=all)>]\n"
 		    "Version %s\n"
 		    "Options:\n"
 		    "\t-v\tVerbose mode (use multiple to increase verbosity)\n"
@@ -1790,92 +2098,15 @@ help_msg(char *progname)
 		    progname, VERSION, CONFIG_FILE1, CONFIG_FILE2);
 }
 
-#define TMPCHARBUFSIZE	128
-
-int
-main(int argc, char **argv)
+int shared_adaptivemmd_init()
 {
-	int c, i, lockfd;
-	int errflag = 0;
-	char tmpbuf[TMPCHARBUFSIZE];
 	struct utsname name;
-
-	openlog("adaptivemmd", LOG_PID, LOG_DAEMON);
-	if (parse_config() == 0)
-		bailout(1);
-
-	while ((c = getopt(argc, argv, "a:m:hsvd")) != -1) {
-		switch (c) {
-		case 'a':
-			aggressiveness = atoi(optarg);
-			if ((aggressiveness < 1) || (aggressiveness > 3))
-				aggressiveness = 2;
-			break;
-		case 'm':
-			maxgap = atoi(optarg);
-			break;
-		case 'd':
-			debug_mode = 1;
-			break;
-		case 'v':
-			/* Ignore in case of dry run */
-			if (dry_run == 0)
-				verbose++;
-			break;
-		case 's':
-			dry_run = 1;
-			verbose = 2;
-			debug_mode = 1;
-			break;
-		case 'h':
-			help_msg(argv[0]);
-			bailout(0);
-		default:
-			errflag++;
-			break;
-		}
-	}
-
-	/* Handle signals to ensure proper cleanup */
-	signal(SIGTERM, mysig);
-	signal(SIGHUP, mysig);
-
-	/* Check if an instance is running already */
-	lockfd = open(LOCKFILE, O_RDWR|O_CREAT|O_EXCL, 0644);
-	if (lockfd < 0) {
-		if (errno == EEXIST)
-			fprintf(stderr, "Lockfile %s exists. Another daemon may be running. Exiting now", LOCKFILE);
-		else
-			fprintf(stderr, "Failed to open lockfile %s", LOCKFILE);
-		bailout(1);
-	} else {
-		del_lock = 1;
-		ftruncate(lockfd, 0);
-	}
-
-	snprintf(tmpbuf, TMPCHARBUFSIZE, "%ld\n", (long)getpid());
-	if (write(lockfd, (const void *)tmpbuf, strlen(tmpbuf)) < 0) {
-		fprintf(stderr, "Failed to write PID to lockfile %s", LOCKFILE);
-		close(lockfd);
-		bailout(1);
-	}
-
-	if (errflag) {
-		help_msg(argv[0]);
-		bailout(1);
-	}
+	int i;
 
 	if (!check_permissions()) {
 		fprintf(stderr, "ERROR: No permission to read/write required files. Are you running as root? Exiting\n");
-		bailout(1);
+		return -1;
 	}
-
-	/* Become a daemon unless -d was specified */
-	if (!debug_mode)
-		if (daemon(0, 0) != 0) {
-			fprintf(stderr, "Failed to become daemon. %s", strerror(errno));
-			bailout(1);
-		}
 
 	/*
 	 * Determine the architecture we are running on and decide if "DMA"
@@ -1911,6 +2142,7 @@ main(int argc, char **argv)
 	}
 
 	update_zone_watermarks();
+	iteration++;    /* iteration 0 is for 1st update_zone_watermarks() */
 
 	/*
 	 * If user specifies a maximum gap value for gap between low
@@ -1920,7 +2152,7 @@ main(int argc, char **argv)
 	if (maxgap != 0) {
 		unsigned long total_managed = 0;
 
-		for (i = 0; i < MAX_NUMANODES; i++)
+		for (i = 0; i < max_numanodes; i++)
 			total_managed += managed_pages[i];
 		maxwsf = (maxgap * 10000UL * 1024UL * 1024UL * 1024UL)/(total_managed * getpagesize());
 	}
@@ -1931,29 +2163,161 @@ main(int argc, char **argv)
 	 */
 	base_psize = getpagesize()/1024;
 
-	pr_info("adaptivemmd "VERSION" started (verbose=%d, aggressiveness=%d, maxgap=%d)", verbose, aggressiveness, maxgap);
+	pr_info("adaptivemmd "VERSION" started (verbose=%d, debug_mode=%d, aggressiveness=%d, maxgap=%d)", verbose, debug_mode, aggressiveness, maxgap);
 
-	one_time_initializations();
+	return 0;
+}
+
+#ifdef STANDALONE
+
+#define TMPCHARBUFSIZE	128
+
+int init_adaptivemmd(int argc, char **argv)
+{
+	int c, lockfd;
+	int errflag = 0;
+	char tmpbuf[TMPCHARBUFSIZE];
+	struct adaptivemmd_opts *opts;
+	int enables = 0;
+
+        opts = malloc(sizeof(struct adaptivemmd_opts));
+        if (!opts) {
+		fprintf(stderr, "adaptivemmd_main: no memory.\n");
+		bailout(1);
+        }
+        memset(opts, 0, sizeof( struct adaptivemmd_opts));
+
+	if (setup_numa_arrays(opts) < 0) {
+                fprintf(stderr, "adaptivemmd_main: setup numa arrays failed.\n");
+		bailout(1);
+        }
+
+	openlog("adaptivemmd", LOG_PID, LOG_DAEMON);
+	if (parse_config() == 0)
+		bailout(1);
+
+	while ((c = getopt(argc, argv, "a:m:hsvdS:L:E:")) != -1) {
+		switch (c) {
+		case 'a':
+			aggressiveness = atoi(optarg);
+			if ((aggressiveness < 1) || (aggressiveness > 3))
+				aggressiveness = 2;
+			break;
+		case 'm':
+			maxgap = atoi(optarg);
+			break;
+		case 'd':
+			debug_mode = 1;
+			break;
+		case 'v':
+			/* Ignore in case of dry run */
+			if (dry_run == 0)
+				verbose++;
+			break;
+		case 's':
+			dry_run = 1;
+			verbose = 2;
+			debug_mode = 1;
+			break;
+		case 'h':
+			help_msg(argv[0]);
+			bailout(0);
+		case 'S':
+			sample_path = optarg;
+			if (access(sample_path, F_OK) != 0) {
+				log_err("Can't find sample path: %s\n", sample_path);
+				bailout(0);
+			}
+			break;
+		case 'L':
+			log_file = optarg;
+			break;
+		case 'E':
+			enables = atoi(optarg);
+			break;
+		default:
+			errflag++;
+			break;
+		}
+	}
+	if (enables) {
+		memory_pressure_check_enabled = false;
+		neg_dentry_check_enabled = false;
+		memleak_check_enabled = false;
+		switch (enables) {
+		case 1:		/* ENABLE_FREE_PAGE_MGMT */
+			memory_pressure_check_enabled = true;
+			break;
+		case 2:		/* ENABLE_NEG_DENTRY_MGMT */
+			neg_dentry_check_enabled = true;
+			break;
+		case 3:		/* ENABLE_MEMLEAK_CHECK */
+			memleak_check_enabled = true;
+			break;
+		case 4:		/* all */
+			memory_pressure_check_enabled = true;
+			neg_dentry_check_enabled = true;
+			memleak_check_enabled = true;
+			break;
+		default:
+			log_err("Unknown enables setting: %d\n", enables);
+			bailout(1);
+		}
+	}
+
+	/* Handle signals to ensure proper cleanup */
+	signal(SIGTERM, mysig);
+	signal(SIGHUP, mysig);
+
+	/* Check if an instance is running already */
+	lockfd = open(LOCKFILE, O_RDWR|O_CREAT|O_EXCL, 0644);
+	if (lockfd < 0) {
+		if (errno == EEXIST)
+			fprintf(stderr, "Lockfile %s exists. Another daemon may be running. Exiting now", LOCKFILE);
+		else
+			fprintf(stderr, "Failed to open lockfile %s", LOCKFILE);
+		bailout(1);
+	} else {
+		del_lock = 1;
+		ftruncate(lockfd, 0);
+	}
+
+	snprintf(tmpbuf, TMPCHARBUFSIZE, "%ld\n", (long)getpid());
+	if (write(lockfd, (const void *)tmpbuf, strlen(tmpbuf)) < 0) {
+		fprintf(stderr, "Failed to write PID to lockfile %s", LOCKFILE);
+		close(lockfd);
+		bailout(1);
+	}
+
+	if (errflag) {
+		help_msg(argv[0]);
+		bailout(1);
+	}
+
+	if (shared_adaptivemmd_init() < 0)
+		bailout(1);
+
+	if (one_time_initializations() < 0) {
+		fprintf(stderr, "one_time_initializations() failed.\n");
+		bailout(1);
+	}
+
+	/* Become a daemon unless -d was specified */
+	if (!debug_mode)
+		if (daemon(0, 0) != 0) {
+			fprintf(stderr, "Failed to become daemon. %s", strerror(errno));
+			bailout(1);
+		}
+
 
 	while (1) {
-		int retval;
+		if (run_memory_checks() < 0) {
+			fprintf(stderr, "run_memory_checks() failed.\n");
+			bailout(1);
+		}
 
-		/*
-		 * Start with updated zone watermarks and number of hugepages
-		 * allocated since these can be adjusted by user any time.
-		 * Update maxwsf to account for hugepages just in case
-		 * number of hugepages changed unless user already gave
-		 * a maxgap value.
-		 */
-		update_zone_watermarks();
-		retval = update_hugepages();
-		if (retval > 0)
-			updates_for_hugepages(retval);
-		if (maxgap == 0)
-			rescale_maxwsf();
-
-		check_memory_pressure(false);
-		check_memory_leak(false);
+		if (sample_path)
+			continue;
 
 		sleep(periodicity);
 	}
@@ -1961,3 +2325,10 @@ main(int argc, char **argv)
 	closelog();
 	return 0;
 }
+
+int
+main(int argc, char **argv)
+{
+	return(init_adaptivemmd(argc, argv));
+}
+#endif
