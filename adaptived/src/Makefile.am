@@ -13,6 +13,7 @@ SOURCES = \
 	causes/periodic.c \
 	causes/pressure.c \
 	causes/pressure_rate.c \
+	causes/adaptivemmd_causes.c \
 	causes/slabinfo.c \
 	causes/time_of_day.c \
 	causes/top.c \
@@ -31,6 +32,7 @@ SOURCES = \
 	effects/sd_bus_setting.c \
 	effects/snooze.c \
 	effects/validate.c \
+	effects/adaptivemmd_effects.c \
 	effect.c \
 	effect.h \
 	log.c \
@@ -45,7 +47,37 @@ SOURCES = \
 	utils/mem_utils.c \
 	utils/path_utils.c \
 	utils/pressure_utils.c \
-	utils/sched_utils.c
+	utils/sched_utils.c \
+	../../adaptivemmd.c \
+	../../adaptivemm_opts.h \
+	../../predict.c \
+	../../predict.h
+
+CLEANFILES = \
+	../adaptivemm_opts.h \
+	../adaptivemmd.c \
+	../predict.c \
+	../predict.h \
+	../../.deps \
+	../../adaptived-adaptivemmd.gcda \
+	../../adaptived-adaptivemmd.gcno \
+	../../adaptived-predict.gcda \
+	../../adaptived-predict.gcno \
+	../../libadaptived_la-adaptivemmd.gcno \
+	../../libadaptived_la-predict.gcno
+
+DISTCLEANFILES = \
+	../adaptivemm_opts.h \
+	../adaptivemmd.c \
+	../predict.c \
+	../predict.h \
+	../../.deps \
+	../../adaptived-adaptivemmd.gcda \
+	../../adaptived-adaptivemmd.gcno \
+	../../adaptived-predict.gcda \
+	../../adaptived-predict.gcno \
+	../../libadaptived_la-adaptivemmd.gcno \
+	../../libadaptived_la-predict.gcno
 
 adaptived_SOURCES = ${SOURCES}
 adaptived_CFLAGS = ${AM_CFLAGS} ${CFLAGS}  ${CODE_COVERAGE_CFLAGS} -Wall
